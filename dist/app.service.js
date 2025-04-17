@@ -15,6 +15,7 @@ const schedule_1 = require("@nestjs/schedule");
 const axios_1 = require("@nestjs/axios");
 const rxjs_1 = require("rxjs");
 const prisma_service_1 = require("./prisma/prisma.service");
+const axios_2 = require("axios");
 const tough_cookie_1 = require("tough-cookie");
 let AppService = class AppService {
     constructor(httpService, prisma) {
@@ -51,31 +52,72 @@ let AppService = class AppService {
             headers['Cookie'] = await this.cookiejar.getCookieString(link);
         }
         const start = performance.now();
-        const response = await (0, rxjs_1.firstValueFrom)(this.httpService.get(link, {
-            responseType: 'text',
-            withCredentials: this.first,
-            headers: headers,
-        }));
-        const end = performance.now();
-        const time = end - start;
-        this.first = false;
-        const no_spaces = response.data.replaceAll(' ', '');
-        const no_newlines = no_spaces.replaceAll(/(\r\n|\n|\r)/g, '');
-        await this.prisma.requestLogs.create({
-            data: {
-                headers: JSON.stringify(response.headers),
-                html: no_newlines,
-                roundtrip: time,
-                status: response.status,
-                sent_headers: JSON.stringify(headers),
-                sent_cookies: headers['Cookie'] ?? 'No cookies',
-            },
-        });
-        await this.checkForNewCookies(response.headers, link);
-        if (response.status !== 200) {
-            this.failures = this.failures + 1;
+        let end;
+        try {
+            const response = await (0, rxjs_1.firstValueFrom)(this.httpService.get(link, {
+                responseType: 'text',
+                withCredentials: this.first,
+                headers: headers,
+                timeout: 10_000,
+            }));
+            end = performance.now();
+            const time = end - start;
+            const no_spaces = response.data.replaceAll(' ', '');
+            const no_newlines = no_spaces.replaceAll(/(\r\n|\n|\r)/g, '');
+            await this.prisma.requestLogs.create({
+                data: {
+                    headers: JSON.stringify(response.headers),
+                    html: no_newlines,
+                    roundtrip: time,
+                    status: response.status,
+                    sent_headers: JSON.stringify(headers),
+                    sent_cookies: headers['Cookie'] ?? 'No cookies',
+                },
+            });
+            await this.checkForNewCookies(response.headers, link);
+            if (response.status !== 200) {
+                this.failures = this.failures + 1;
+            }
+            console.log(new Date().toLocaleString(), ' status = ', response.status);
         }
-        console.log(new Date().toLocaleString(), ' status = ', response.status);
+        catch (error) {
+            end = performance.now();
+            const time = end - start;
+            const status = error.response?.status ?? 0;
+            const headersFromError = error.response?.headers
+                ? JSON.stringify(error.response.headers)
+                : 'No headers';
+            const htmlFromError = error.response?.data
+                ? JSON.stringify(error.response.data)
+                : 'No HTML body';
+            let error_info;
+            if (axios_2.default.isAxiosError(error)) {
+                const err = error;
+                error_info = JSON.stringify({
+                    message: err.message,
+                    code: err.code,
+                    status: err.response?.status ?? 0,
+                    url: err.config?.url,
+                });
+            }
+            else {
+                error_info = JSON.stringify(error);
+            }
+            await this.prisma.requestLogs.create({
+                data: {
+                    headers: headersFromError,
+                    html: htmlFromError,
+                    roundtrip: time,
+                    status: status,
+                    sent_headers: JSON.stringify(headers),
+                    sent_cookies: headers['Cookie'] ?? 'No cookies',
+                    error_info: error_info,
+                },
+            });
+            this.failures = this.failures + 1;
+            console.log(new Date().toLocaleString(), ' status = ', status);
+        }
+        this.first = false;
     }
     async checkForNewCookies(headers, url) {
         if (headers['set-cookie'] && headers['set-cookie'].length > 0) {

@@ -29,5 +29,6 @@ model RequestLogs {
   status       Int
   headers      String   @db.Text
   html         String   @db.Text
+  error_info   String?  @db.Text
   timestamp    DateTime @default(now())
 }

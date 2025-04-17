@@ -3,7 +3,7 @@ import { Cron } from '@nestjs/schedule';
 import { HttpService } from '@nestjs/axios';
 import { firstValueFrom } from 'rxjs';
 import { PrismaService } from './prisma/prisma.service';
-import { RawAxiosResponseHeaders } from 'axios';
+import axios, { AxiosError, RawAxiosResponseHeaders } from 'axios';
 import { CookieJar } from 'tough-cookie';
 
 @Injectable()
@@ -53,34 +53,80 @@ export class AppService {
     }
 
     const start = performance.now();
-    const response = await firstValueFrom(
-      this.httpService.get(link, {
-        responseType: 'text',
-        withCredentials: this.first,
-        headers: headers,
-      }),
-    );
-    const end = performance.now();
-    const time = end - start;
-    this.first = false;
 
-    const no_spaces = (response.data as string).replaceAll(' ', '');
-    const no_newlines = no_spaces.replaceAll(/(\r\n|\n|\r)/g, '');
-    await this.prisma.requestLogs.create({
-      data: {
-        headers: JSON.stringify(response.headers),
-        html: no_newlines,
-        roundtrip: time,
-        status: response.status,
-        sent_headers: JSON.stringify(headers),
-        sent_cookies: headers['Cookie'] ?? 'No cookies',
-      },
-    });
-    await this.checkForNewCookies(response.headers, link);
-    if (response.status !== 200) {
+    let end;
+    try {
+      const response = await firstValueFrom(
+        this.httpService.get(link, {
+          responseType: 'text',
+          withCredentials: this.first,
+          headers: headers,
+          timeout: 10_000,
+        }),
+      );
+      end = performance.now();
+      const time = end - start;
+      const no_spaces = (response.data as string).replaceAll(' ', '');
+      const no_newlines = no_spaces.replaceAll(/(\r\n|\n|\r)/g, '');
+      await this.prisma.requestLogs.create({
+        data: {
+          headers: JSON.stringify(response.headers),
+          html: no_newlines,
+          roundtrip: time,
+          status: response.status,
+          sent_headers: JSON.stringify(headers),
+          sent_cookies: headers['Cookie'] ?? 'No cookies',
+        },
+      });
+      await this.checkForNewCookies(response.headers, link);
+      if (response.status !== 200) {
+        this.failures = this.failures + 1;
+      }
+      console.log(new Date().toLocaleString(), ' status = ', response.status);
+    } catch (error) {
+      end = performance.now();
+      const time = end - start;
+
+      // Fallbacks
+      const status = error.response?.status ?? 0;
+      const headersFromError = error.response?.headers
+        ? JSON.stringify(error.response.headers)
+        : 'No headers';
+      const htmlFromError = error.response?.data
+        ? JSON.stringify(error.response.data)
+        : 'No HTML body';
+
+      let error_info;
+      if (axios.isAxiosError(error)) {
+        const err = error as AxiosError;
+        error_info = JSON.stringify({
+          message: err.message,
+          code: err.code,
+          status: err.response?.status ?? 0,
+          url: err.config?.url,
+        });
+      } else {
+        error_info = JSON.stringify(error);
+      }
+
+      // Log the failure
+      await this.prisma.requestLogs.create({
+        data: {
+          headers: headersFromError,
+          html: htmlFromError,
+          roundtrip: time,
+          status: status,
+          sent_headers: JSON.stringify(headers),
+          sent_cookies: headers['Cookie'] ?? 'No cookies',
+          error_info: error_info,
+        },
+      });
+
       this.failures = this.failures + 1;
+      console.log(new Date().toLocaleString(), ' status = ', status);
     }
-    console.log(new Date().toLocaleString(), ' status = ', response.status);
+
+    this.first = false;
   }
 
   private async checkForNewCookies(
